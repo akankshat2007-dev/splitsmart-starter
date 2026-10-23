@@ -1,15 +1,20 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { supabase } from '../lib/supabaseClient';
 import {
   calculateBalances,
   calculateShares,
   CATEGORIES,
   formatINR,
-  loadAppData,
+  loadExpenseDetails,
+  loadPeople,
   localDateValue,
+  makeExpenseUuid,
   makeId,
-  saveAppData,
+  mapDatabaseExpense,
+  saveExpenseDetails,
+  savePeople,
   suggestSettlements,
 } from './expense-utils';
 
@@ -34,6 +39,14 @@ export default function Home() {
   const [expenses, setExpenses] = useState([]);
   const [people, setPeople] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [authStatus, setAuthStatus] = useState('loading');
+  const [loadingExpenses, setLoadingExpenses] = useState(true);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [databaseError, setDatabaseError] = useState('');
+  const [savingExpense, setSavingExpense] = useState(false);
+  const [deletingExpense, setDeletingExpense] = useState(false);
+  const expenseRequestLock = useRef(false);
+  const deleteRequestLock = useRef(false);
   const [view, setView] = useState('dashboard');
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -50,15 +63,92 @@ export default function Home() {
   const [toast, setToast] = useState('');
 
   useEffect(() => {
-    const saved = loadAppData();
-    setPeople(saved.people);
-    setExpenses(saved.expenses);
-    setLoaded(true);
-  }, []);
+    const initialPeople = loadPeople();
+    setPeople(initialPeople);
+    let active = true;
+
+    async function loadExpenses() {
+      setLoadingExpenses(true);
+      setDatabaseError('');
+      let authResult;
+      try {
+        authResult = await supabase.auth.getUser();
+      } catch (error) {
+        if (!active) return;
+        setAuthStatus('error');
+        setDatabaseError(`Could not verify your Supabase session: ${error.message || 'Network error.'}`);
+        setLoadingExpenses(false);
+        setLoaded(true);
+        return;
+      }
+      const { data: { user }, error: authError } = authResult;
+      if (!active) return;
+      if (authError) {
+        setAuthStatus('error');
+        setDatabaseError(`Could not verify your Supabase session: ${authError.message}`);
+        setLoadingExpenses(false);
+        setLoaded(true);
+        return;
+      }
+      if (!user) {
+        setAuthStatus('unauthenticated');
+        setExpenses([]);
+        setDatabaseError('No authenticated Supabase session. Sign in through the app’s Supabase auth flow before using the expenses table.');
+        setToast('Supabase sign-in is required to load expenses. No user ID was guessed.');
+        setLoadingExpenses(false);
+        setLoaded(true);
+        return;
+      }
+
+      setAuthStatus('authenticated');
+      let queryResult;
+      try {
+        queryResult = await supabase
+          .from('expenses')
+          .select('id, user_id, name, emoji, paid_by, amount, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false });
+      } catch (error) {
+        if (!active) return;
+        const message = `Could not load expenses: ${error.message || 'Network error.'}`;
+        setDatabaseError(message);
+        setToast(message);
+        setExpenses([]);
+        setLoadingExpenses(false);
+        setLoaded(true);
+        return;
+      }
+      const { data, error } = queryResult;
+      if (!active) return;
+      if (error) {
+        const message = `Could not load expenses: ${error.message}`;
+        setDatabaseError(message);
+        setToast(message);
+        setExpenses([]);
+      } else {
+        const details = loadExpenseDetails();
+        const mapped = (data || []).map((row) => mapDatabaseExpense(row, initialPeople, details));
+        const payerPeople = mapped
+          .filter((expense) => !initialPeople.some((person) => person.name.toLowerCase() === expense.paidBy.toLowerCase()))
+          .map((expense) => ({ id: expense.payerId, name: expense.paidBy, isMe: false, isSample: false }));
+        const mergedPeople = [...initialPeople, ...payerPeople.filter((person, index) => payerPeople.findIndex((candidate) => candidate.id === person.id) === index)];
+        setPeople(mergedPeople);
+        setExpenses(mapped.map((expense) => ({
+          ...expense,
+          payerId: mergedPeople.find((person) => person.name.toLowerCase() === expense.paidBy.toLowerCase())?.id || expense.payerId,
+        })));
+      }
+      setLoadingExpenses(false);
+      setLoaded(true);
+    }
+
+    loadExpenses();
+    return () => { active = false; };
+  }, [reloadToken]);
 
   useEffect(() => {
-    if (loaded && !saveAppData({ people, expenses })) setToast('Could not save data. Check available browser storage.');
-  }, [people, expenses, loaded]);
+    if (loaded && !savePeople(people)) setToast('Could not save participants on this device.');
+  }, [people, loaded]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -70,6 +160,7 @@ export default function Home() {
   const settlements = useMemo(() => suggestSettlements(balances), [balances]);
   const me = people.find((person) => person.isMe) || people[0];
   const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const expensesWithoutSplitDetails = expenses.filter((expense) => expense.splitsAvailable === false).length;
   const paidByMe = expenses.filter((expense) => expense.payerId === me?.id).reduce((sum, expense) => sum + expense.amount, 0);
   const myShare = expenses.reduce((sum, expense) => sum + (expense.shares.find((share) => share.personId === me?.id)?.amount || 0), 0);
   const myBalance = me ? balances[me.id] || 0 : 0;
@@ -104,8 +195,9 @@ export default function Home() {
     });
   }
 
-  function submitExpense(event) {
+  async function submitExpense(event) {
     event.preventDefault();
+    if (expenseRequestLock.current) return;
     setFormError('');
     if (!form.description.trim()) return setFormError('Enter an expense description.');
     if (!Number.isFinite(Number(form.amount)) || Number(form.amount) <= 0) return setFormError('Amount must be greater than zero.');
@@ -117,7 +209,7 @@ export default function Home() {
       return setFormError(error.message);
     }
     const expense = {
-      id: editingId || `expense-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      id: editingId || '',
       description: form.description.trim(),
       amount: Math.round(Number(form.amount) * 100) / 100,
       payerId: form.payerId,
@@ -127,17 +219,93 @@ export default function Home() {
       category: form.category,
       date: form.date || localDateValue(),
     };
-    setExpenses((current) => editingId ? current.map((item) => item.id === editingId ? expense : item) : [expense, ...current]);
-    setFormOpen(false);
-    setEditingId('');
-    setToast(editingId ? 'Expense updated. Balances recalculated.' : 'Expense added. Balances recalculated.');
+    expenseRequestLock.current = true;
+    setSavingExpense(true);
+    try {
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) {
+        setFormError(authError?.message || 'Sign in to Supabase before saving expenses.');
+        setAuthStatus(authError ? 'error' : 'unauthenticated');
+        return;
+      }
+
+      const record = {
+        name: expense.description,
+        emoji: '🧾',
+        paid_by: nameOf(expense.payerId),
+        amount: expense.amount,
+        created_at: new Date(`${expense.date}T12:00:00`).toISOString(),
+      };
+      const result = editingId
+        ? await supabase.from('expenses').update(record).eq('id', editingId).eq('user_id', user.id).select('id, user_id, name, emoji, paid_by, amount, created_at').single()
+        : await supabase.from('expenses').insert({ ...record, id: makeExpenseUuid(), user_id: user.id }).select('id, user_id, name, emoji, paid_by, amount, created_at').single();
+
+      if (result.error) {
+        setFormError(`Could not ${editingId ? 'update' : 'save'} this expense: ${result.error.message}`);
+        return;
+      }
+
+      const savedExpense = { ...mapDatabaseExpense(result.data, people, {}), ...expense, id: result.data.id, splitsAvailable: true };
+      const allDetails = loadExpenseDetails();
+      const nextDetails = {
+        ...allDetails,
+        [result.data.id]: { participantIds: expense.participantIds, shares: expense.shares, splitMethod: expense.splitMethod, category: expense.category },
+      };
+      if (!saveExpenseDetails(nextDetails)) setToast('Expense saved, but split details could not be saved in this browser.');
+      setExpenses((current) => editingId ? current.map((item) => item.id === editingId ? savedExpense : item) : [savedExpense, ...current]);
+      setFormOpen(false);
+      setEditingId('');
+      setDatabaseError('');
+      if (authStatus !== 'authenticated') setAuthStatus('authenticated');
+      setToast(editingId ? 'Expense updated.' : 'Expense added.');
+    } catch (error) {
+      setFormError(`Could not save this expense: ${error.message || 'Unexpected database error.'}`);
+    } finally {
+      expenseRequestLock.current = false;
+      setSavingExpense(false);
+    }
   }
 
-  function confirmDeleteExpense() {
-    setExpenses((current) => current.filter((expense) => expense.id !== deleteTarget.id));
-    setDeleteTarget(null);
-    setDetail(null);
-    setToast('Expense deleted. Balances recalculated.');
+  async function confirmDeleteExpense() {
+    if (!deleteTarget || deleteRequestLock.current) return;
+    deleteRequestLock.current = true;
+    setDeletingExpense(true);
+    try {
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) {
+        const message = authError?.message || 'Sign in to Supabase before deleting expenses.';
+        setDatabaseError(message);
+        setToast(message);
+        setAuthStatus(authError ? 'error' : 'unauthenticated');
+        return;
+      }
+      const { data, error } = await supabase.from('expenses').delete().eq('id', deleteTarget.id).eq('user_id', user.id).select('id').maybeSingle();
+      if (error) {
+        const message = `Could not delete expense: ${error.message}`;
+        setDatabaseError(message);
+        setToast(message);
+        return;
+      }
+      if (!data) {
+        const message = 'No matching expense was deleted. It may not belong to the signed-in user or may already be removed.';
+        setDatabaseError(message);
+        setToast(message);
+        return;
+      }
+      setExpenses((current) => current.filter((expense) => expense.id !== deleteTarget.id));
+      const allDetails = loadExpenseDetails();
+      delete allDetails[deleteTarget.id];
+      saveExpenseDetails(allDetails);
+      setDeleteTarget(null);
+      setDetail(null);
+      setDatabaseError('');
+      setToast('Expense deleted.');
+    } catch (error) {
+      setDatabaseError(`Could not delete expense: ${error.message || 'Unexpected database error.'}`);
+    } finally {
+      deleteRequestLock.current = false;
+      setDeletingExpense(false);
+    }
   }
 
   function savePerson(event) {
@@ -223,8 +391,9 @@ export default function Home() {
     return <div className="modal-shade" onMouseDown={(event) => { if (event.target === event.currentTarget) setFormOpen(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="expense-modal-title"><div className="modal-header"><div><span className="eyebrow">{editingId ? 'UPDATE EXPENSE' : 'NEW EXPENSE'}</span><h2 id="expense-modal-title">{editingId ? 'Edit expense' : 'Add an expense'}</h2></div><button className="icon-button close-button" aria-label="Close" onClick={() => setFormOpen(false)}>×</button></div><form onSubmit={submitExpense}><div className="form-grid"><label className="field field-wide">Description<input autoFocus value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="e.g. Dinner" required /></label><label className="field">Total amount<input type="number" min="0.01" step="0.01" value={form.amount} onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))} placeholder="₹ 0.00" required /></label><label className="field">Category<select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}>{CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label><label className="field">Paid by<select value={form.payerId} onChange={(event) => setForm((current) => ({ ...current, payerId: event.target.value }))} required>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.isMe ? ' (you)' : ''}</option>)}</select></label><label className="field">Date<input type="date" value={form.date} onChange={(event) => setForm((current) => ({ ...current, date: event.target.value }))} required /></label></div><fieldset className="participant-set"><legend>Participants sharing this expense</legend><div className="participant-grid">{people.map((person) => <label className={`participant-choice ${form.participantIds.includes(person.id) ? 'chosen' : ''}`} key={person.id}><input type="checkbox" checked={form.participantIds.includes(person.id)} onChange={() => toggleParticipant(person.id)} /><span className="avatar avatar-small">{initials(person.name)}</span><span>{person.name}{person.isMe ? ' (you)' : ''}</span></label>)}</div></fieldset><fieldset className="split-set"><legend>Split method</legend><div className="split-toggle"><button type="button" className={form.splitMethod === 'equal' ? 'selected' : ''} onClick={() => setForm((current) => ({ ...current, splitMethod: 'equal' }))}>Split equally</button><button type="button" className={form.splitMethod === 'custom' ? 'selected' : ''} onClick={() => setForm((current) => ({ ...current, splitMethod: 'custom' }))}>Custom amounts</button></div>{form.splitMethod === 'custom' && <div className="custom-split-list">{form.participantIds.map((id) => <label className="custom-split-row" key={id}><span>{nameOf(id)}</span><div><span>₹</span><input type="number" min="0" step="0.01" value={form.splitValues?.[id] ?? ''} onChange={(event) => setForm((current) => ({ ...current, splitValues: { ...current.splitValues, [id]: event.target.value } }))} aria-label={`${nameOf(id)} share in rupees`} /></div></label>)}</div>}{form.splitMethod === 'equal' && form.participantIds.length && Number(form.amount) > 0 ? <p className="split-preview">{form.participantIds.map((id) => `${nameOf(id)}: ${formatINR(Number(form.amount) / form.participantIds.length)}`).join(' · ')}. Any paise remainder is distributed fairly.</p> : null}</fieldset>{formError && <p className="form-error" role="alert">{formError}</p>}<div className="modal-footer"><button type="button" className="button button-quiet" onClick={() => setFormOpen(false)}>Cancel</button><button className="button button-primary">{editingId ? 'Save changes' : 'Save expense'}</button></div></form></section></div>;
   }
 
-  if (!loaded) return <main className="loading-screen"><span className="brand-mark">S</span><span>Loading SplitSmart…</span></main>;
+  if (!loaded || loadingExpenses) return <main className="loading-screen"><span className="brand-mark">S</span><span>Checking your Supabase session and loading expenses…</span></main>;
+  if (authStatus !== 'authenticated') return <main className="loading-screen"><span className="brand-mark">S</span><strong>Sign in is required</strong><span>{databaseError || 'This expense list is protected by Supabase Row-Level Security.'}</span><span>The current app does not include a sign-in screen. Add an authenticated Supabase session before using expenses.</span><button className="button button-secondary" onClick={() => { setLoaded(false); setLoadingExpenses(true); setReloadToken((current) => current + 1); }}>Retry session check</button></main>;
 
-  return <main className="app-shell"><aside className="sidebar"><button className="brand-lockup" onClick={() => setView('dashboard')}><span className="brand-mark">S</span><span className="brand-type">split<span>smart</span><small>SHARED, SIMPLIFIED</small></span></button><span className="nav-caption">YOUR SPACE</span><nav className="side-nav" aria-label="Main navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}{item.id === 'settlements' && settlements.length > 0 && <span className="nav-count">{settlements.length}</span>}</button>)}</nav><div className="sidebar-bottom"><div className="saved-indicator"><span /> Saved in this browser</div><div className="account-chip"><span className="avatar">{initials(me?.name || 'Me')}</span><div><strong>{me?.name || 'Me'}</strong><small>Personal account</small></div></div></div></aside><section className="main-area"><header className="topbar"><div><span>Workspace</span><b>/</b><strong>{NAV_ITEMS.find((item) => item.id === view)?.label}</strong></div><span className="local-badge"><i /> Local storage</span></header><div className="page-content">{view === 'dashboard' && dashboard()}{view === 'expenses' && expensesView()}{view === 'people' && peopleView()}{view === 'settlements' && settlementsView()}</div><footer className="page-footer">SplitSmart <span>·</span> Shared, simplified.</footer></section><nav className="mobile-nav" aria-label="Mobile navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><span>{item.icon}</span><small>{item.label}</small></button>)}</nav>
+  return <main className="app-shell"><aside className="sidebar"><button className="brand-lockup" onClick={() => setView('dashboard')}><span className="brand-mark">S</span><span className="brand-type">split<span>smart</span><small>SHARED, SIMPLIFIED</small></span></button><span className="nav-caption">YOUR SPACE</span><nav className="side-nav" aria-label="Main navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}{item.id === 'settlements' && settlements.length > 0 && <span className="nav-count">{settlements.length}</span>}</button>)}</nav><div className="sidebar-bottom"><div className="saved-indicator"><span /> Saved in this browser</div><div className="account-chip"><span className="avatar">{initials(me?.name || 'Me')}</span><div><strong>{me?.name || 'Me'}</strong><small>Personal account</small></div></div></div></aside><section className="main-area"><header className="topbar"><div><span>Workspace</span><b>/</b><strong>{NAV_ITEMS.find((item) => item.id === view)?.label}</strong></div><span className="local-badge"><i /> Supabase</span></header><div className="page-content">{databaseError && <div className="database-notice" role="alert"><span>{databaseError}</span><button className="button button-secondary" onClick={() => { setLoaded(false); setLoadingExpenses(true); setReloadToken((current) => current + 1); }}>Retry</button></div>}{expensesWithoutSplitDetails > 0 && <div className="database-notice split-notice" role="status"><span>{expensesWithoutSplitDetails} expense(s) have no split details in the supplied database schema. Their totals are shown, but they are excluded from settlement calculations. Split details are kept only in this browser.</span></div>}{view === 'dashboard' && dashboard()}{view === 'expenses' && expensesView()}{view === 'people' && peopleView()}{view === 'settlements' && settlementsView()}</div><footer className="page-footer">SplitSmart <span>·</span> Shared, simplified.</footer></section><nav className="mobile-nav" aria-label="Mobile navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><span>{item.icon}</span><small>{item.label}</small></button>)}</nav>
     {expenseForm()}{detail && <div className="modal-shade" onMouseDown={(event) => { if (event.target === event.currentTarget) setDetail(null); }}><section className="modal detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><div className="modal-header"><div><span className="eyebrow">EXPENSE DETAILS</span><h2 id="detail-title">{detail.description}</h2></div><button className="icon-button close-button" aria-label="Close" onClick={() => setDetail(null)}>×</button></div><div className="detail-total">{formatINR(detail.amount)}<span>{detail.category}</span></div><div className="detail-facts"><div><small>Paid by</small><strong>{nameOf(detail.payerId)}</strong></div><div><small>Date</small><strong>{new Date(`${detail.date}T12:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</strong></div><div><small>Split</small><strong>{detail.splitMethod === 'custom' ? 'Custom amounts' : 'Equal'}</strong></div></div><h3 className="share-title">Individual shares</h3><div className="detail-share-list">{detail.shares.map((share) => <div key={share.personId}><span className="avatar avatar-small">{initials(nameOf(share.personId))}</span><span>{nameOf(share.personId)}</span><strong>{formatINR(share.amount)}</strong></div>)}</div><div className="modal-footer spread"><button className="button button-danger" onClick={() => setDeleteTarget(detail)}>Delete</button><div><button className="button button-quiet" onClick={() => setDetail(null)}>Close</button><button className="button button-primary" onClick={() => openEditExpense(detail)}>Edit expense</button></div></div></section></div>}{deleteTarget && <div className="modal-shade"><section className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-expense-title"><div className="confirm-mark">!</div><h2 id="delete-expense-title">Delete this expense?</h2><p><strong>{deleteTarget.description}</strong> will be removed and all balances will be recalculated.</p><div className="modal-footer"><button className="button button-quiet" onClick={() => setDeleteTarget(null)}>Cancel</button><button className="button button-danger" onClick={confirmDeleteExpense}>Delete expense</button></div></section></div>}{personDeleteTarget && <div className="modal-shade"><section className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-person-title"><div className="confirm-mark">!</div><h2 id="delete-person-title">Remove {personDeleteTarget.name}?</h2><p>This participant has no saved expenses. They will be removed from your people list.</p><div className="modal-footer"><button className="button button-quiet" onClick={() => setPersonDeleteTarget(null)}>Cancel</button><button className="button button-danger" onClick={deletePerson}>Remove participant</button></div></section></div>}{toast && <div className="toast" role="status"><span>✓</span>{toast}<button aria-label="Dismiss" onClick={() => setToast('')}>×</button></div>}</main>;
 }

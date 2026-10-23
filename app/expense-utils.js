@@ -1,6 +1,7 @@
 export const STORAGE_KEYS = {
   expenses: 'splitsmart.expenses',
   people: 'splitsmart.people',
+  expenseDetails: 'splitsmart.expense-details',
 };
 
 export const CATEGORIES = ['Food', 'Travel', 'Shopping', 'Bills', 'Groceries', 'Other'];
@@ -28,8 +29,7 @@ function readArray(key) {
   }
 }
 
-export function loadAppData() {
-  const savedExpenses = readArray(STORAGE_KEYS.expenses);
+export function loadPeople() {
   const savedPeople = readArray(STORAGE_KEYS.people);
   const people = (savedPeople || [
     { id: 'person-me', name: 'Me', isMe: true, isSample: false },
@@ -38,44 +38,66 @@ export function loadAppData() {
     { id: 'person-aisha', name: 'Aisha', isMe: false, isSample: true },
   ]).filter((person) => person && typeof person.id === 'string' && typeof person.name === 'string');
   if (!people.some((person) => person.isMe)) people.unshift({ id: 'person-me', name: 'Me', isMe: true, isSample: false });
-
-  const legacyPayers = (savedExpenses || []).map((expense) => expense?.paidBy).filter((name) => typeof name === 'string');
-  legacyPayers.forEach((name) => {
-    if (!people.some((person) => person.name.toLowerCase() === name.toLowerCase())) {
-      people.push({ id: `legacy-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, name, isMe: false, isSample: false });
-    }
-  });
-
-  const expenses = (savedExpenses || []).filter((expense) => expense && typeof expense === 'object' && Number.isFinite(Number(expense.amount)) && Number(expense.amount) > 0).map((expense) => {
-    const amount = Math.round(Number(expense.amount) * 100) / 100;
-    const matchedPayer = people.find((person) => person.name.toLowerCase() === String(expense.paidBy || '').toLowerCase());
-    const payerId = expense.payerId || matchedPayer?.id || people.find((person) => person.isMe)?.id;
-    const participantIds = Array.isArray(expense.participantIds) && expense.participantIds.length ? expense.participantIds.filter((id) => people.some((person) => person.id === id)) : [payerId];
-    const shares = Array.isArray(expense.shares) ? expense.shares.filter((share) => share && people.some((person) => person.id === share.personId) && Number.isFinite(Number(share.amount))).map((share) => ({ personId: share.personId, amount: Math.round(Number(share.amount) * 100) / 100 })) : [{ personId: payerId, amount }];
-    return {
-      id: typeof expense.id === 'string' ? expense.id : `migrated-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      description: String(expense.description || expense.name || 'Expense'),
-      amount,
-      payerId,
-      participantIds: participantIds.length ? participantIds : [payerId],
-      shares: shares.length ? shares : [{ personId: payerId, amount }],
-      splitMethod: expense.splitMethod === 'custom' ? 'custom' : 'equal',
-      category: CATEGORIES.includes(expense.category) ? expense.category : 'Other',
-      date: /^\d{4}-\d{2}-\d{2}$/.test(expense.date || '') ? expense.date : localDateValue(),
-    };
-  });
-
-  return { people, expenses };
+  return people;
 }
 
-export function saveAppData({ people, expenses }) {
+export function savePeople(people) {
   try {
     localStorage.setItem(STORAGE_KEYS.people, JSON.stringify(people));
-    localStorage.setItem(STORAGE_KEYS.expenses, JSON.stringify(expenses));
     return true;
   } catch {
     return false;
   }
+}
+
+export function loadExpenseDetails() {
+  try {
+    const details = JSON.parse(localStorage.getItem(STORAGE_KEYS.expenseDetails) || '{}');
+    return details && typeof details === 'object' && !Array.isArray(details) ? details : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveExpenseDetails(details) {
+  try {
+    localStorage.setItem(STORAGE_KEYS.expenseDetails, JSON.stringify(details));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function mapDatabaseExpense(row, people, details = {}) {
+  const candidate = details[row.id];
+  const detail = candidate && Array.isArray(candidate.participantIds) && Array.isArray(candidate.shares) ? candidate : null;
+  const paidBy = String(row.paid_by || 'Unknown');
+  const payer = people.find((person) => person.name.toLowerCase() === paidBy.toLowerCase());
+  const createdAt = new Date(row.created_at);
+  const isValidDate = Number.isFinite(createdAt.getTime());
+  return {
+    id: row.id,
+    description: row.name,
+    emoji: row.emoji || '🧾',
+    paidBy,
+    payerId: payer?.id || `remote-${paidBy.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+    amount: Number(row.amount),
+    participantIds: detail?.participantIds || [],
+    shares: detail?.shares || [],
+    splitMethod: detail?.splitMethod || 'equal',
+    category: detail?.category || 'Other',
+    date: isValidDate ? localDateValue(createdAt) : localDateValue(),
+    splitsAvailable: Boolean(detail),
+  };
+}
+
+export function makeExpenseUuid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function calculateShares(amountValue, participantIds, method, values = {}) {
@@ -101,6 +123,7 @@ export function calculateShares(amountValue, participantIds, method, values = {}
 export function calculateBalances(expenses, people) {
   const centsByPerson = Object.fromEntries(people.map((person) => [person.id, 0]));
   expenses.forEach((expense) => {
+    if (expense.splitsAvailable === false) return;
     centsByPerson[expense.payerId] = (centsByPerson[expense.payerId] || 0) + Math.round(expense.amount * 100);
     (expense.shares || []).forEach((share) => {
       centsByPerson[share.personId] = (centsByPerson[share.personId] || 0) - Math.round(share.amount * 100);

@@ -213,6 +213,9 @@ h1, h2, h3, p { margin-top: 0; }
 .toast { position: fixed; z-index: 20; right: 22px; bottom: 22px; display: flex; max-width: min(430px, calc(100vw - 32px)); align-items: center; gap: 10px; padding: 12px 12px 12px 14px; border: 1px solid #dce9de; border-radius: 7px; background: #fff; box-shadow: var(--shadow); color: #526259; font-size: 11px; animation: modal-in .18s ease-out; }
 .toast > span { color: #438058; }
 .toast button { margin-left: auto; border: 0; background: transparent; color: #89958d; font-size: 17px; }
+.database-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid #efd6d0; border-radius: 6px; background: #fff6f4; color: #8c473d; font-size: 11px; line-height: 1.55; }
+.database-notice .button { flex: 0 0 auto; }
+.split-notice { border-color: #eadfca; background: #fbf7ee; color: #806b45; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; clip-path: inset(50%); }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -266,6 +269,7 @@ h1, h2, h3, p { margin-top: 0; }
   .field input, .field select { height: 37px; font-size: 11px; }
   .detail-modal { max-height: 84vh; }
   .toast { right: 12px; bottom: 73px; }
+  .database-notice { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 390px) {
   .page-heading { gap: 8px; }
