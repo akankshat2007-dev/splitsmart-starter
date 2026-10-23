@@ -1,4 +1,5 @@
 import './globals.css';
+import SessionControl from './session-control';
 
 export const metadata = {
   title: 'SplitSmart',
@@ -14,7 +15,7 @@ export const viewport = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>{children}<SessionControl /></body>
     </html>
   );
 }

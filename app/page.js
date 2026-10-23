@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabaseClient';
+import GroupManagement from './group-management';
 import {
   calculateBalances,
   calculateShares,
@@ -21,6 +23,7 @@ import {
 const NAV_ITEMS = [
   { id: 'dashboard', icon: '▦', label: 'Dashboard' },
   { id: 'expenses', icon: '↗', label: 'Expenses' },
+  { id: 'groups', icon: '◉', label: 'Groups' },
   { id: 'people', icon: '♧', label: 'People' },
   { id: 'settlements', icon: '⇄', label: 'Settlements' },
 ];
@@ -36,8 +39,10 @@ function makeForm(people) {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [expenses, setExpenses] = useState([]);
   const [people, setPeople] = useState([]);
+  const [authUser, setAuthUser] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [authStatus, setAuthStatus] = useState('loading');
   const [loadingExpenses, setLoadingExpenses] = useState(true);
@@ -101,12 +106,14 @@ export default function Home() {
       }
 
       setAuthStatus('authenticated');
+      setAuthUser(user);
       let queryResult;
       try {
         queryResult = await supabase
           .from('expenses')
-          .select('id, user_id, name, emoji, paid_by, amount, created_at')
+          .select('id, user_id, group_id, name, emoji, paid_by, amount, created_at')
           .eq('user_id', user.id)
+          .is('group_id', null)
           .order('created_at', { ascending: false });
       } catch (error) {
         if (!active) return;
@@ -155,6 +162,10 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(''), 3200);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (view === 'groups') router.push('/groups');
+  }, [view, router]);
 
   const balances = useMemo(() => calculateBalances(expenses, people), [expenses, people]);
   const settlements = useMemo(() => suggestSettlements(balances), [balances]);
@@ -237,8 +248,8 @@ export default function Home() {
         created_at: new Date(`${expense.date}T12:00:00`).toISOString(),
       };
       const result = editingId
-        ? await supabase.from('expenses').update(record).eq('id', editingId).eq('user_id', user.id).select('id, user_id, name, emoji, paid_by, amount, created_at').single()
-        : await supabase.from('expenses').insert({ ...record, id: makeExpenseUuid(), user_id: user.id }).select('id, user_id, name, emoji, paid_by, amount, created_at').single();
+        ? await supabase.from('expenses').update(record).eq('id', editingId).eq('user_id', user.id).is('group_id', null).select('id, user_id, group_id, name, emoji, paid_by, amount, created_at').single()
+        : await supabase.from('expenses').insert({ ...record, id: makeExpenseUuid(), user_id: user.id }).select('id, user_id, group_id, name, emoji, paid_by, amount, created_at').single();
 
       if (result.error) {
         setFormError(`Could not ${editingId ? 'update' : 'save'} this expense: ${result.error.message}`);
@@ -279,7 +290,7 @@ export default function Home() {
         setAuthStatus(authError ? 'error' : 'unauthenticated');
         return;
       }
-      const { data, error } = await supabase.from('expenses').delete().eq('id', deleteTarget.id).eq('user_id', user.id).select('id').maybeSingle();
+      const { data, error } = await supabase.from('expenses').delete().eq('id', deleteTarget.id).eq('user_id', user.id).is('group_id', null).select('id').maybeSingle();
       if (error) {
         const message = `Could not delete expense: ${error.message}`;
         setDatabaseError(message);
@@ -392,7 +403,7 @@ export default function Home() {
   }
 
   if (!loaded || loadingExpenses) return <main className="loading-screen"><span className="brand-mark">S</span><span>Checking your Supabase session and loading expenses…</span></main>;
-  if (authStatus !== 'authenticated') return <main className="loading-screen"><span className="brand-mark">S</span><strong>Sign in is required</strong><span>{databaseError || 'This expense list is protected by Supabase Row-Level Security.'}</span><span>The current app does not include a sign-in screen. Add an authenticated Supabase session before using expenses.</span><button className="button button-secondary" onClick={() => { setLoaded(false); setLoadingExpenses(true); setReloadToken((current) => current + 1); }}>Retry session check</button></main>;
+  if (authStatus !== 'authenticated') return <main className="loading-screen"><span className="brand-mark">S</span><strong>Sign in is required</strong><span>{databaseError || 'This expense list is protected by Supabase Row-Level Security.'}</span><span>Sign in with your SplitSmart account to continue.</span><div className="auth-gate-actions"><button className="button button-primary" onClick={() => router.push('/login')}>Sign in</button><button className="button button-secondary" onClick={() => router.push('/signup')}>Create account</button><button className="button button-quiet" onClick={() => { setLoaded(false); setLoadingExpenses(true); setReloadToken((current) => current + 1); }}>Retry session check</button></div></main>;
 
   return <main className="app-shell"><aside className="sidebar"><button className="brand-lockup" onClick={() => setView('dashboard')}><span className="brand-mark">S</span><span className="brand-type">split<span>smart</span><small>SHARED, SIMPLIFIED</small></span></button><span className="nav-caption">YOUR SPACE</span><nav className="side-nav" aria-label="Main navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}{item.id === 'settlements' && settlements.length > 0 && <span className="nav-count">{settlements.length}</span>}</button>)}</nav><div className="sidebar-bottom"><div className="saved-indicator"><span /> Saved in this browser</div><div className="account-chip"><span className="avatar">{initials(me?.name || 'Me')}</span><div><strong>{me?.name || 'Me'}</strong><small>Personal account</small></div></div></div></aside><section className="main-area"><header className="topbar"><div><span>Workspace</span><b>/</b><strong>{NAV_ITEMS.find((item) => item.id === view)?.label}</strong></div><span className="local-badge"><i /> Supabase</span></header><div className="page-content">{databaseError && <div className="database-notice" role="alert"><span>{databaseError}</span><button className="button button-secondary" onClick={() => { setLoaded(false); setLoadingExpenses(true); setReloadToken((current) => current + 1); }}>Retry</button></div>}{expensesWithoutSplitDetails > 0 && <div className="database-notice split-notice" role="status"><span>{expensesWithoutSplitDetails} expense(s) have no split details in the supplied database schema. Their totals are shown, but they are excluded from settlement calculations. Split details are kept only in this browser.</span></div>}{view === 'dashboard' && dashboard()}{view === 'expenses' && expensesView()}{view === 'people' && peopleView()}{view === 'settlements' && settlementsView()}</div><footer className="page-footer">SplitSmart <span>·</span> Shared, simplified.</footer></section><nav className="mobile-nav" aria-label="Mobile navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><span>{item.icon}</span><small>{item.label}</small></button>)}</nav>
     {expenseForm()}{detail && <div className="modal-shade" onMouseDown={(event) => { if (event.target === event.currentTarget) setDetail(null); }}><section className="modal detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><div className="modal-header"><div><span className="eyebrow">EXPENSE DETAILS</span><h2 id="detail-title">{detail.description}</h2></div><button className="icon-button close-button" aria-label="Close" onClick={() => setDetail(null)}>×</button></div><div className="detail-total">{formatINR(detail.amount)}<span>{detail.category}</span></div><div className="detail-facts"><div><small>Paid by</small><strong>{nameOf(detail.payerId)}</strong></div><div><small>Date</small><strong>{new Date(`${detail.date}T12:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</strong></div><div><small>Split</small><strong>{detail.splitMethod === 'custom' ? 'Custom amounts' : 'Equal'}</strong></div></div><h3 className="share-title">Individual shares</h3><div className="detail-share-list">{detail.shares.map((share) => <div key={share.personId}><span className="avatar avatar-small">{initials(nameOf(share.personId))}</span><span>{nameOf(share.personId)}</span><strong>{formatINR(share.amount)}</strong></div>)}</div><div className="modal-footer spread"><button className="button button-danger" onClick={() => setDeleteTarget(detail)}>Delete</button><div><button className="button button-quiet" onClick={() => setDetail(null)}>Close</button><button className="button button-primary" onClick={() => openEditExpense(detail)}>Edit expense</button></div></div></section></div>}{deleteTarget && <div className="modal-shade"><section className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-expense-title"><div className="confirm-mark">!</div><h2 id="delete-expense-title">Delete this expense?</h2><p><strong>{deleteTarget.description}</strong> will be removed and all balances will be recalculated.</p><div className="modal-footer"><button className="button button-quiet" onClick={() => setDeleteTarget(null)}>Cancel</button><button className="button button-danger" onClick={confirmDeleteExpense}>Delete expense</button></div></section></div>}{personDeleteTarget && <div className="modal-shade"><section className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-person-title"><div className="confirm-mark">!</div><h2 id="delete-person-title">Remove {personDeleteTarget.name}?</h2><p>This participant has no saved expenses. They will be removed from your people list.</p><div className="modal-footer"><button className="button button-quiet" onClick={() => setPersonDeleteTarget(null)}>Cancel</button><button className="button button-danger" onClick={deletePerson}>Remove participant</button></div></section></div>}{toast && <div className="toast" role="status"><span>✓</span>{toast}<button aria-label="Dismiss" onClick={() => setToast('')}>×</button></div>}</main>;
