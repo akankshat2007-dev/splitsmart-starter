@@ -14,6 +14,8 @@ function PasswordInput({ label, value, onChange, autoComplete }) {
 
 export default function AuthForm({ mode }) {
   const router = useRouter();
+  const [activeMode, setActiveMode] = useState(mode);
+  const authMode = mode === 'login' || mode === 'signup' ? activeMode : mode;
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -24,7 +26,7 @@ export default function AuthForm({ mode }) {
   const [recoveryReady, setRecoveryReady] = useState(mode !== 'reset');
 
   useEffect(() => {
-    if (mode !== 'reset') return undefined;
+    if (authMode !== 'reset') return undefined;
     let active = true;
     supabase.auth.getSession().then(({ data, error: sessionError }) => {
       if (!active) return;
@@ -42,26 +44,25 @@ export default function AuthForm({ mode }) {
       active = false;
       listener.subscription.unsubscribe();
     };
-  }, [mode]);
+  }, [authMode]);
 
   async function submit(event) {
     event.preventDefault();
     setError('');
     setMessage('');
     const normalizedEmail = email.trim().toLowerCase();
-    if (mode !== 'reset' && !EMAIL_PATTERN.test(normalizedEmail)) return setError('Enter a valid email address.');
-    if (mode === 'signup' && fullName.trim().length < 2) return setError('Enter your full name.');
-    if ((mode === 'signup' || mode === 'reset') && password !== confirmPassword) return setError('The passwords do not match.');
-    if ((mode === 'signup' || mode === 'reset') && password.length < 8) return setError('Choose a password with at least 8 characters.');
+    if (authMode !== 'reset' && !EMAIL_PATTERN.test(normalizedEmail)) return setError('Enter a valid email address.');
+    if (authMode === 'signup' && fullName.trim().length < 2) return setError('Enter your full name.');
+    if ((authMode === 'signup' || authMode === 'reset') && password !== confirmPassword) return setError('The passwords do not match.');
+    if ((authMode === 'signup' || authMode === 'reset') && password.length < 8) return setError('Choose a password with at least 8 characters.');
 
     setBusy(true);
     try {
-      if (mode === 'login') {
+      if (authMode === 'login') {
         const { error: authError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
         if (authError) throw authError;
-        router.replace('/');
-        router.refresh();
-      } else if (mode === 'signup') {
+        window.location.assign('/');
+      } else if (authMode === 'signup') {
         const { data, error: authError } = await supabase.auth.signUp({
           email: normalizedEmail,
           password,
@@ -69,18 +70,17 @@ export default function AuthForm({ mode }) {
         });
         if (authError) throw authError;
         if (data.session) {
-          router.replace('/');
-          router.refresh();
+          window.location.assign('/');
         } else {
           setMessage('Account created. Check your email to confirm your address, then sign in.');
         }
-      } else if (mode === 'forgot') {
+      } else if (authMode === 'forgot') {
         const { error: authError } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
           redirectTo: `${window.location.origin}/reset-password`,
         });
         if (authError) throw authError;
         setMessage('If an account exists for this email, a password-reset link has been sent.');
-      } else if (mode === 'reset') {
+      } else if (authMode === 'reset') {
         if (!recoveryReady) throw new Error('Open a valid password-reset link before setting a new password.');
         const { error: authError } = await supabase.auth.updateUser({ password });
         if (authError) throw authError;
@@ -100,15 +100,15 @@ export default function AuthForm({ mode }) {
     signup: ['Create your account', 'Start sharing expenses with your group.'],
     forgot: ['Reset your password', 'We’ll email you a secure reset link.'],
     reset: ['Choose a new password', 'Set a new password for your account.'],
-  }[mode];
+  }[authMode];
 
-  return <main className="auth-page"><div className="auth-decoration" aria-hidden="true"><span>₹</span><i /><i /><i /></div><section className="auth-card"><Link href="/login" className="auth-brand"><span className="brand-mark">S</span><span className="brand-type">split<span>smart</span><small>SHARED, SIMPLIFIED</small></span></Link><span className="eyebrow">YOUR SHARED EXPENSES</span><h1>{heading[0]}</h1><p className="auth-intro">{heading[1]}</p><form onSubmit={submit} className="auth-form">
-    {mode === 'signup' && <label className="auth-field">Full name<input value={fullName} onChange={(event) => setFullName(event.target.value)} autoComplete="name" required minLength={2} /></label>}
-    {(mode !== 'reset') && <label className="auth-field">Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>}
-    {(mode === 'login' || mode === 'signup' || mode === 'reset') && <PasswordInput label={mode === 'reset' ? 'New password' : 'Password'} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />}
-    {(mode === 'signup' || mode === 'reset') && <PasswordInput label="Confirm password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" />}
-    {mode === 'login' && <div className="auth-inline-link"><Link href="/forgot-password">Forgot password?</Link></div>}
+  return <main className="auth-page"><div className="auth-decoration" aria-hidden="true"><span>₹</span><i /><i /><i /></div><section className="auth-card"><Link href="/login" className="auth-brand"><span className="brand-mark">S</span><span className="brand-type">split<span>smart</span><small>SHARED, SIMPLIFIED</small></span></Link><span className="eyebrow">YOUR SHARED EXPENSES</span>{(mode === 'login' || mode === 'signup') && <div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={authMode === 'login'} className={authMode === 'login' ? 'active' : ''} onClick={() => { setActiveMode('login'); setError(''); setMessage(''); }}>Login</button><button type="button" role="tab" aria-selected={authMode === 'signup'} className={authMode === 'signup' ? 'active' : ''} onClick={() => { setActiveMode('signup'); setError(''); setMessage(''); }}>Sign Up</button></div>}<h1>{heading[0]}</h1><p className="auth-intro">{heading[1]}</p><form onSubmit={submit} className="auth-form">
+    {authMode === 'signup' && <label className="auth-field">Full name<input value={fullName} onChange={(event) => setFullName(event.target.value)} autoComplete="name" required minLength={2} /></label>}
+    {(authMode !== 'reset') && <label className="auth-field">Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>}
+    {(authMode === 'login' || authMode === 'signup' || authMode === 'reset') && <PasswordInput label={authMode === 'reset' ? 'New password' : 'Password'} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} />}
+    {(authMode === 'signup' || authMode === 'reset') && <PasswordInput label="Confirm password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" />}
+    {authMode === 'login' && <div className="auth-inline-link"><Link href="/forgot-password">Forgot password?</Link></div>}
     {error && <p className="auth-error" role="alert">{error}</p>}{message && <p className="auth-success" role="status">{message}</p>}
-    <button className="button button-primary auth-submit" disabled={busy || (mode === 'reset' && !recoveryReady)}>{busy ? 'Please wait…' : { login: 'Sign in', signup: 'Create account', forgot: 'Send reset link', reset: 'Update password' }[mode]}</button>
-  </form><div className="auth-switch">{mode === 'login' && <>New to SplitSmart? <Link href="/signup">Create an account</Link></>}{mode === 'signup' && <>Already registered? <Link href="/login">Sign in</Link></>}{mode === 'forgot' && <>Remembered your password? <Link href="/login">Back to sign in</Link></>}{mode === 'reset' && <>Return to <Link href="/login">sign in</Link></>}</div><p className="auth-local-note">Your account is secured by Supabase authentication.</p></section></main>;
+    <button className="button button-primary auth-submit" disabled={busy || (authMode === 'reset' && !recoveryReady)}>{busy ? 'Please wait…' : { login: 'Sign in', signup: 'Create account', forgot: 'Send reset link', reset: 'Update password' }[authMode]}</button>
+  </form><div className="auth-switch">{authMode === 'login' && <>New to SplitSmart? <button type="button" onClick={() => { setActiveMode('signup'); setError(''); }}>Sign up</button></>}{authMode === 'signup' && <>Already registered? <button type="button" onClick={() => { setActiveMode('login'); setError(''); }}>Sign in</button></>}{authMode === 'forgot' && <>Remembered your password? <Link href="/login">Back to sign in</Link></>}{authMode === 'reset' && <>Return to <Link href="/login">sign in</Link></>}</div><p className="auth-local-note">Your account is secured by Supabase authentication.</p></section></main>;
 }
